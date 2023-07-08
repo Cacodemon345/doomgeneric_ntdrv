@@ -14,7 +14,7 @@ From the x86/x64 Free Build Environment, cd to the directory where you have clon
 Copy it to your system32\Drivers directory of your Windows installation. And then grab the doomgenericntinst.reg from one of the releases and double-click it to install.
 
 # Running
-You need my fork of NativeShell to start DoomGeneric NTDrv.
+You need my fork of NativeShell to start DoomGeneric NTDrv (bundled with the release). Follow instructions at https://github.com/Cacodemon345/NativeShell to install it.
 
 Type 'doomstart' to start it. It expects the Doom 2 IWAD to reside in C:\Windows\ at the moment. Command line arguments are ignored.
 
