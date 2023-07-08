@@ -1,4 +1,5 @@
-﻿################################################################################
-# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
-################################################################################
-
+﻿doomgeneric/obj*_*_*
+doomgeneric/obj*_*_*/
+doomgeneric/build*_*_*.log
+.vscode/
+screenshots/
