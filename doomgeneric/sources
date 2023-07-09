@@ -91,5 +91,6 @@ w_file_stdc.c \
 w_main.c \
 w_wad.c \
 wi_stuff.c \
-z_zone.c
+z_zone.c \
+vgahelper.c
 

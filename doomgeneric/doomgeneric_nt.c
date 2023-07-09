@@ -106,6 +106,7 @@ int* _imp___errno()
 }
 
 static PVOID heap = NULL;
+static BOOLEAN InhibitGraphicsPrint = FALSE;
 
 #define strace(s, x, ...) nt_printf(x": 0x%X", __VA_ARGS__, s)
 #define etrace(x, ...) nt_printf(x, __VA_ARGS__)
@@ -174,7 +175,10 @@ int __cdecl nt_printf (const char* fmt, ...)
 	//
 	// Display it on screen
 	//
-	Status = ZwDisplayString(&MessageString);
+	if (!InhibitGraphicsPrint)
+		Status = ZwDisplayString(&MessageString);
+
+	DbgPrint("%ls", MessageString.Buffer);
 
 	//
 	// Free Memory
@@ -679,6 +683,27 @@ static BOOLEAN IsWindows8OrLater()
 }
 
 static byte DGNT_ScrBuf[DOOMGENERIC_RESX * DOOMGENERIC_RESY];
+extern ULONG_PTR VgaBase;
+
+extern BOOLEAN NTAPI VidInitialize(BOOLEAN SetMode);
+extern int init_graph_vga(int width, int height,int chain4);
+extern VOID TextMode(VOID);
+
+#define LO						 85
+#define MD						170
+#define HI						255
+
+typedef struct tagRGBQUAD
+{
+    UCHAR rgbBlue;
+    UCHAR rgbGreen;
+    UCHAR rgbRed;
+    UCHAR rgbReserved;
+} RGBQUAD, *LPRGBQUAD;
+
+RGBQUAD gray = { 127, 127, 127, 255 };
+
+extern VOID NTAPI SetPaletteEntryRGB(ULONG Id, RGBQUAD Rgb);
 void DG_Init()
 {
 	IO_STATUS_BLOCK iosb;
@@ -686,7 +711,8 @@ void DG_Init()
 	OBJECT_ATTRIBUTES ObjectAttributes;
 	UNICODE_STRING ustr;
 	IO_STATUS_BLOCK Iosb;
-	ULONG solidcolfillparams[5] = { 0, 0, 639, 479, 0 };
+	//ULONG solidcolfillparams[5] = { 0, 0, 639, 479, 0 };
+	unsigned int i = 0;
 
 	if (IsWindows8OrLater())
 	{
@@ -697,11 +723,12 @@ void DG_Init()
 		}
 	}
 	//nt_printf("%s\n", __func__);
-	InbvResetDisplay();
-	InbvSetTextColor(BV_COLOR_WHITE);
-	InbvInstallDisplayStringFilter(NULL);
-	InbvEnableDisplayString(TRUE);
-	InbvSetScrollRegion(0, 0, 679, 449);
+	//InbvResetDisplay();
+	//InbvSetTextColor(BV_COLOR_WHITE);
+	//InbvInstallDisplayStringFilter(NULL);
+	//InbvEnableDisplayString(TRUE);
+	//InbvSetScrollRegion(0, 0, 679, 449);
+	
 	//nt_printf("%s 4\n", __func__);
 	RtlInitUnicodeString(&ustr, L"\\Device\\KeyboardClass0");
 	InitializeObjectAttributes(&ObjectAttributes,
@@ -719,6 +746,68 @@ void DG_Init()
 			DG_SleepMs(1);
 		}
 	}
+
+	RtlInitUnicodeString(&ustr, L"\\Device\\Video0");
+	InitializeObjectAttributes(&ObjectAttributes,
+							   &ustr,
+							   OBJ_CASE_INSENSITIVE,
+							   NULL,
+							   NULL);
+	//nt_printf("%s 5\n", __func__);
+
+#if 0
+	Status = NtCreateFile(&pVideoDevice, SYNCHRONIZE | GENERIC_READ | FILE_READ_ATTRIBUTES, &ObjectAttributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL, 0, FILE_OPEN, FILE_DIRECTORY_FILE, NULL, 0);
+	if (!NT_SUCCESS(Status))
+	{
+		nt_printf("Failed to open \\Device\\Video0: 0x%X.\n", Status);
+		while (1)
+		{
+			DG_SleepMs(1);
+		}
+	}
+
+	//ZwDeviceIoControlFile(pVideoDevice, NULL, NULL, NULL, &Iosb, IOCTL_VIDEO_RESET_DEVICE, NULL, 0, NULL, 0);
+nt_ioctl((NT_FILE*)&pVideoDevice, IOCTL_VIDEO_QUERY_NUM_AVAIL_MODES, "doomgeneric_nt", NULL, 0, (void*)&numModes, sizeof(VIDEO_NUM_MODES), NULL);
+	nt_printf("%d, %lu\n", numModes.NumModes, numModes.ModeInformationLength);
+
+	modes = nt_calloc(numModes.NumModes, numModes.ModeInformationLength);
+
+	nt_ioctl((NT_FILE*)&pVideoDevice, IOCTL_VIDEO_QUERY_AVAIL_MODES, "doomgeneric_nt", NULL, 0, (void*)modes, numModes.ModeInformationLength * numModes.NumModes, NULL);
+
+	for (i = 0; i < numModes.NumModes; i++)
+	{
+		nt_printf("%dx%dx%d\n", modes[i].VisScreenWidth, modes[i].VisScreenHeight, modes[i].BitsPerPlane * modes[i].NumberOfPlanes);
+	}
+	
+	for (i = 0; i < numModes.NumModes; i++)
+	{
+		if (modes[i].VisScreenWidth == 320 && modes[i].VisScreenHeight == 200)
+		{
+			VIDEO_MODE mode;
+			mode.RequestedMode = i;
+			nt_ioctl((NT_FILE*)&pVideoDevice, IOCTL_VIDEO_SET_CURRENT_MODE, "doomgeneric_nt", (void*)&mode, sizeof(VIDEO_MODE), NULL, 0, NULL);
+			nt_printf("%dx%dx%d set\n", modes[i].VisScreenWidth, modes[i].VisScreenHeight, modes[i].BitsPerPlane * modes[i].NumberOfPlanes);
+		}
+		//nt_printf("%dx%dx%d\n", modes[i].VisScreenWidth, modes[i].VisScreenHeight, modes[i].BitsPerPlane * modes[i].NumberOfPlanes);
+	}
+
+	memReq.RequestedVirtualAddress = NULL;
+	RtlZeroMemory(&memInfo, sizeof(VIDEO_MEMORY_INFORMATION));
+	nt_ioctl((NT_FILE*)&pVideoDevice, IOCTL_VIDEO_MAP_VIDEO_MEMORY, "doomgeneric_nt", (void*)&memReq, sizeof(VIDEO_MEMORY), (void*)&memInfo, sizeof(VIDEO_MEMORY_INFORMATION), NULL);
+	if (memInfo.VideoRamBase)
+	{
+		uint16_t* buffer = (uint16_t*)memInfo.FrameBufferBase;
+		buffer[0] = 'T' | (0x0f00);
+		buffer[1] = 'e' | (0x0f00);
+		buffer[2] = 's' | (0x0f00);
+		buffer[3] = 't' | (0x0f00);
+		while (1)
+		{
+			DG_SleepMs(1);
+		}
+	}
+#endif
+
 	//nt_printf("%s 6\n", __func__);
 	InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
 	ZwCreateEvent(&hKeyboardEvent, EVENT_ALL_ACCESS, &ObjectAttributes, 1, 0);
@@ -747,17 +836,6 @@ void DG_SleepMs(uint32_t ms)
 	sleepAmount.QuadPart = -((LONGLONG)(ms) * 10000);
 	KeDelayExecutionThread(KernelMode, FALSE, &sleepAmount);
 }
-#define LO						 85
-#define MD						170
-#define HI						255
-
-typedef struct tagRGBQUAD
-{
-    UCHAR rgbBlue;
-    UCHAR rgbGreen;
-    UCHAR rgbRed;
-    UCHAR rgbReserved;
-} RGBQUAD, *LPRGBQUAD;
 
 static const RGBQUAD TextModePalette[16] =
 {
@@ -814,7 +892,7 @@ static int GetPaletteIndex(int r, int g, int b)
 
 	return best;
 }
-extern RGBQUAD* I_GetPalPtr();
+extern RGBQUAD* I_GetPalPtr(void);
 static void RGBtoHSV(float r, float g, float b, float* h, float* s, float* v)
 {
 	float min, max, delta, foo;
@@ -889,16 +967,19 @@ struct ColFillParams
 	ULONG Bottom;
 	ULONG color;
 };
-#define UNDETAILLEVELX 4
-#define UNDETAILLEVELY 4
+#define UNDETAILLEVELX 2
+#define UNDETAILLEVELY 2
+extern void I_ReadScreen (byte* scr);
 void DG_DrawFrame()
 {
+#if 0
 	UINT32 x = 0, y = 0;
 	uint8_t* dgPixBuf = (void*)DG_ScreenBuffer;
 	for (y = 0; y < DOOMGENERIC_RESY; y += UNDETAILLEVELX)
 	{
 		for (x = 0; x < DOOMGENERIC_RESX; x += UNDETAILLEVELY)
 		{
+
 			float h = 0, s = 0, v = 0;
 			float r = dgPixBuf[y * DOOMGENERIC_RESX * 4 + x * 4 + 2] / 255.f;
 			float g = dgPixBuf[y * DOOMGENERIC_RESX * 4 + x * 4 + 1] / 255.f;
@@ -929,9 +1010,29 @@ void DG_DrawFrame()
 			fillcol.color = attrib & 0xF;
 			DGNT_ScrBuf[y * DOOMGENERIC_RESX + x] = attrib;
 			//nt_ioctl((NT_FILE*)&pDevice, IOCTL_INBVSHIM_SOLID_COLOR_FILL, "doomgeneric_nt", &fillcol, sizeof(struct ColFillParams), NULL, 0, NULL);
-			InbvSolidColorFill(fillcol.Left, fillcol.Top, fillcol.Right, fillcol.Bottom, fillcol.color);
+			//InbvSolidColorFill(fillcol.Left, fillcol.Top, fillcol.Right, fillcol.Bottom, fillcol.color);
+
+
 		}
 	}
+#endif
+	int i = 0;
+	RGBQUAD* palette;
+
+	if (!InhibitGraphicsPrint) {
+		InbvEnableBootDriver(FALSE);
+		VidInitialize(TRUE);
+		init_graph_vga(320, 200, 1);
+		memset((void*)VgaBase, 0x0, 0x10000);
+		InhibitGraphicsPrint = 1;
+	}
+
+	palette = I_GetPalPtr();
+	for (i = 0; i < 256; i++)
+	{
+		SetPaletteEntryRGB(i, palette[i]);
+	}
+	I_ReadScreen((byte*)VgaBase);
 	keysRead = 0;
 }
 
@@ -1003,11 +1104,37 @@ void DG_SetWindowTitle(const char* title)
 
 }
 
+#ifdef _M_X64
+#define HAL_HalFindBusAddressTranslation_OFFSET 0x50
+#else
+#define HAL_HalFindBusAddressTranslation_OFFSET 0x28
+#endif
+
+#pragma pack(push, 1)
+typedef struct _HAL_PRIVATE_DISPATCH_TABLE
+{
+	union
+	{
+		ULONG Version;
+        struct {
+            char pad[HAL_HalFindBusAddressTranslation_OFFSET];
+            BOOLEAN (NTAPI *HalFindBusAddressTranslation)(PHYSICAL_ADDRESS, ULONG*, PHYSICAL_ADDRESS*, ULONG_PTR*, BOOLEAN);
+            BOOLEAN (NTAPI *HalResetDisplay)(VOID);
+        };
+    };
+} HAL_PRIVATE_DISPATCH_TABLE;
+#pragma pack(pop)
+
+extern NTSYSAPI HAL_PRIVATE_DISPATCH_TABLE HalPrivateDispatchTable;
+
 void nt_exit(int code)
 {
 	//NtTerminateProcess(NtCurrentProcess(), code);
-
+	HalPrivateDispatchTable.HalResetDisplay();
+	InbvEnableBootDriver(TRUE);
+	InbvResetDisplay();
 	InbvSolidColorFill(0, 0, 639, 479, 0);
+	InhibitGraphicsPrint = 0;
 	nt_printf("Close not implemented!\n");
 
 	while (1) {

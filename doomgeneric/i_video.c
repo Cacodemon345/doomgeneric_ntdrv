@@ -338,7 +338,7 @@ void I_SetPalette (byte* palette)
     }
 }
 
-struct color* I_GetPalPtr()
+struct color* I_GetPalPtr(void)
 {
     return colors;
 }
