@@ -24,6 +24,9 @@
 #include "doomgeneric.h"
 #endif
 
+#include "d_event.h"
+#include <ntddmou.h>
+
 #define INBVSHIM_TYPE 40001
 
 #define IOCTL_INBVSHIM_SOLID_COLOR_FILL \
@@ -663,6 +666,8 @@ NT_FILE* nt_fopena(const char* filename, const char* mode)
 static HANDLE pDevice;
 static HANDLE pKeyboardDevice;
 static HANDLE hKeyboardEvent;
+static HANDLE pMouseDevice = NULL;
+static HANDLE hMouseEvent = NULL;
 
 static BOOLEAN IsWindowsXP()
 {
@@ -701,7 +706,59 @@ typedef struct tagRGBQUAD
     UCHAR rgbReserved;
 } RGBQUAD, *LPRGBQUAD;
 
-RGBQUAD gray = { 127, 127, 127, 255 };
+MOUSE_INPUT_DATA mouseData[256];
+volatile unsigned int mouseDataWrite = 0, mouseDataRead = 0;
+volatile int Quit = 0;
+static HANDLE MouseThreadHandle;
+
+NTSTATUS
+NTAPI
+ZwCancelIoFile(
+	HANDLE FileHandle,
+    PIO_STATUS_BLOCK IoStatusBlock
+);
+
+void MouseThread(void* parm)
+{
+	NTSTATUS Status;
+	IO_STATUS_BLOCK Iosb;
+	UNICODE_STRING ustr;
+	OBJECT_ATTRIBUTES ObjectAttributes;
+	LARGE_INTEGER ByteOffset;
+
+	ByteOffset.QuadPart = 0;
+	RtlInitUnicodeString(&ustr, L"\\Device\\PointerClass0");
+	InitializeObjectAttributes(&ObjectAttributes,
+							   &ustr,
+							   OBJ_CASE_INSENSITIVE,
+							   NULL,
+							   NULL);
+
+	Status = ZwCreateFile(&pMouseDevice, SYNCHRONIZE | GENERIC_READ | FILE_READ_ATTRIBUTES, &ObjectAttributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL, 0, FILE_OPEN, FILE_DIRECTORY_FILE, NULL, 0);
+	if (!NT_SUCCESS(Status))
+	{
+		nt_printf("Failed to open \\Device\\PointerClass0: 0x%X.\n", Status);
+	}
+	while (!Quit)
+	{
+		while ((mouseDataWrite - mouseDataRead) >= 16)
+		{
+			DG_SleepMs(1);
+		}
+
+		if (Quit)
+			break;
+		Status = ZwReadFile(pMouseDevice, hMouseEvent, NULL, NULL, &Iosb, &mouseData[mouseDataWrite & 0xFF], sizeof(MOUSE_INPUT_DATA), &ByteOffset, 0);
+		if (Status == STATUS_PENDING)
+		{
+			ZwCancelIoFile(pMouseDevice, &Iosb);
+		}
+		else if (NT_SUCCESS(Status))
+		{
+			mouseDataWrite++;
+		}
+	}
+}
 
 extern VOID NTAPI SetPaletteEntryRGB(ULONG Id, RGBQUAD Rgb);
 void DG_Init()
@@ -711,6 +768,7 @@ void DG_Init()
 	OBJECT_ATTRIBUTES ObjectAttributes;
 	UNICODE_STRING ustr;
 	IO_STATUS_BLOCK Iosb;
+	MOUSE_ATTRIBUTES mouseAttr;
 	//ULONG solidcolfillparams[5] = { 0, 0, 639, 479, 0 };
 	unsigned int i = 0;
 
@@ -747,12 +805,28 @@ void DG_Init()
 		}
 	}
 
-	RtlInitUnicodeString(&ustr, L"\\Device\\Video0");
+	RtlInitUnicodeString(&ustr, L"\\Device\\PointerClass0");
 	InitializeObjectAttributes(&ObjectAttributes,
 							   &ustr,
 							   OBJ_CASE_INSENSITIVE,
 							   NULL,
 							   NULL);
+	//nt_printf("%s 5\n", __func__);
+	Status = ZwCreateFile(&pMouseDevice, SYNCHRONIZE | GENERIC_READ | FILE_READ_ATTRIBUTES, &ObjectAttributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL, 0, FILE_OPEN, FILE_DIRECTORY_FILE, NULL, 0);
+	if (!NT_SUCCESS(Status))
+	{
+		nt_printf("Failed to open \\Device\\PointerClass0: 0x%X.\n", Status);
+	}
+	else
+	{
+		InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+		Status = PsCreateSystemThread(&MouseThreadHandle, GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, &ObjectAttributes, NULL, NULL, MouseThread, NULL);
+
+		if (!NT_SUCCESS(Status)) {
+			nt_printf("Failed to create mouse thread: 0x%X.\n", Status);
+		}
+	}
+
 	//nt_printf("%s 5\n", __func__);
 
 #if 0
@@ -811,6 +885,8 @@ nt_ioctl((NT_FILE*)&pVideoDevice, IOCTL_VIDEO_QUERY_NUM_AVAIL_MODES, "doomgeneri
 	//nt_printf("%s 6\n", __func__);
 	InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
 	ZwCreateEvent(&hKeyboardEvent, EVENT_ALL_ACCESS, &ObjectAttributes, 1, 0);
+	ZwCreateEvent(&hMouseEvent, EVENT_ALL_ACCESS, &ObjectAttributes, 1, 0);
+	
 	//nt_printf("%s 7\n", __func__);
 }
 struct tickCountStruct
@@ -1042,23 +1118,56 @@ static int IncAndReturn()
 	return keysRead >= 16 ? 0 : 1;
 }
 
-NTSTATUS
-NTAPI
-ZwCancelIoFile(
-	HANDLE FileHandle,
-    PIO_STATUS_BLOCK IoStatusBlock
-);
-
 int DG_GetKey(int* pressed, unsigned char* doomKey)
 {
 	IO_STATUS_BLOCK Iosb;
 	LARGE_INTEGER ByteOffset;
 	NTSTATUS Status;
 	KEYBOARD_INPUT_DATA inputData;
+	MOUSE_INPUT_DATA mouseInputData;
 
 	RtlZeroMemory(&Iosb, sizeof(Iosb));
 	RtlZeroMemory(&ByteOffset, sizeof(ByteOffset));
 	RtlZeroMemory(&inputData, sizeof(KEYBOARD_INPUT_DATA));
+	RtlZeroMemory(&mouseInputData, sizeof(MOUSE_INPUT_DATA));
+
+#if 0
+	Status = NtReadFile(pMouseDevice, hMouseEvent, NULL, NULL, &Iosb, &mouseInputData, sizeof(MOUSE_INPUT_DATA), &ByteOffset, NULL);
+	if (Status == STATUS_PENDING)
+	{
+		// No input to read at the moment, cancel read.
+		ZwCancelIoFile(pMouseDevice, &Iosb);
+	}
+	else if (NT_SUCCESS(Status))
+	{
+		event_t event;
+        event.type = ev_mouse;
+        event.data1 = 0;
+        event.data2 = mouseInputData.LastX;
+        event.data3 = mouseInputData.LastY;
+        D_PostEvent(&event);
+	}
+#endif
+
+	while (mouseDataRead != mouseDataWrite)
+	{
+		static event_t mouseEvent = { ev_mouse, 0, 0, 0, 0 };
+		MOUSE_INPUT_DATA data = mouseData[mouseDataRead & 0xFF];
+		mouseDataRead++;
+
+		if (!(data.Flags & MOUSE_MOVE_ABSOLUTE)) {
+			mouseEvent.data2 = data.LastX * 2;
+			mouseEvent.data3 = -data.LastY * 2;
+		}
+		
+		if (data.ButtonFlags & MOUSE_BUTTON_1_DOWN)
+			mouseEvent.data1 |= 1;
+		if (data.ButtonFlags & MOUSE_BUTTON_1_UP)
+			mouseEvent.data1 &= ~1;
+
+		D_PostEvent(&mouseEvent);
+	}
+
 	Status = NtReadFile(pKeyboardDevice, hKeyboardEvent, NULL, NULL, &Iosb, &inputData, sizeof(KEYBOARD_INPUT_DATA), &ByteOffset, NULL);
 	if (Status == STATUS_PENDING)
 	{
@@ -1135,6 +1244,8 @@ void nt_exit(int code)
 	InbvResetDisplay();
 	InbvSolidColorFill(0, 0, 639, 479, 0);
 	InhibitGraphicsPrint = 0;
+	Quit = 1;
+	ZwSetEvent(hMouseEvent, NULL);
 	nt_printf("Close not implemented!\n");
 
 	while (1) {
